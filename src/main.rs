@@ -11,23 +11,26 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{palette::tailwind, Color, Modifier, Style},
+    symbols,
     text::{Line, Text},
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
+        Block, BorderType, Borders, Cell, Clear, HighlightSpacing, LineGauge, Paragraph, Row,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
     },
     Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use std::io;
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-
-mod cschart;
 mod term;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -58,11 +61,34 @@ pub struct HrTicker {
     pub F: u64,    // First trade ID
     pub L: u64,    // Last trade ID
     pub n: u64,    // Total number of trades
+    #[serde(default = "default_previous_price")]
+    pub previous_price: f32,
+}
+
+fn default_previous_price() -> f32 {
+    0.0
 }
 
 #[derive(Clone, Debug)]
 pub struct Tickers {
     pub tickers: Arc<Mutex<Vec<HrTicker>>>,
+}
+
+#[derive(PartialEq, Eq)]
+enum SortOrder {
+    Ascending,
+    Descending,
+}
+
+#[derive(PartialEq, Eq)]
+enum SortColumn {
+    Symbol,
+    Last,
+    PercentChange,
+    Open,
+    High,
+    Low,
+    Volume,
 }
 
 impl Tickers {
@@ -159,6 +185,11 @@ struct App {
     color_index: usize,
     ticker_length: usize,
     show_chart: bool,
+    chart_data: Option<tokio::task::JoinHandle<Result<String, Box<dyn Error + Send + Sync>>>>,
+    fetched_chart: Option<String>,
+    sort_order: SortOrder,
+    sort_column: SortColumn,
+    previous_prices: HashMap<String, f32>,
 }
 
 impl App {
@@ -172,10 +203,15 @@ impl App {
             color_index: 2,
             ticker_length: 25,
             show_chart: false,
+            chart_data: None,
+            fetched_chart: None,
+            sort_column: SortColumn::Symbol,
+            sort_order: SortOrder::Ascending,
+            previous_prices: HashMap::new(),
         }
     }
 
-    pub fn run(
+    pub async fn run(
         &mut self,
         terminal: &mut Terminal<impl Backend>,
         tickers: Arc<Mutex<Vec<HrTicker>>>,
@@ -188,7 +224,7 @@ impl App {
             })?;
             self.scroll_state = ScrollbarState::new(self.ticker_length * ITEM_HEIGHT)
                 .position(self.scroll_position);
-            self.handle_events().ok();
+            self.handle_events().await.ok();
         }
         Ok(())
     }
@@ -242,42 +278,123 @@ impl App {
         self.colors = TableColors::new(&PALETTES[self.color_index]);
     }
 
-    fn handle_events(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn sort_tickers(&mut self, tickers: &mut Vec<HrTicker>) {
+        match self.sort_column {
+            SortColumn::Symbol => {
+                tickers.sort_by(|a, b| a.s.cmp(&b.s));
+            }
+            SortColumn::Last => {
+                tickers.sort_by(|a, b| a.c.partial_cmp(&b.c).unwrap());
+            }
+            SortColumn::PercentChange => {
+                tickers.sort_by(|a, b| a.P.partial_cmp(&b.P).unwrap());
+            }
+            SortColumn::Open => {
+                tickers.sort_by(|a, b| a.o.partial_cmp(&b.o).unwrap());
+            }
+            SortColumn::High => {
+                tickers.sort_by(|a, b| a.h.partial_cmp(&b.h).unwrap());
+            }
+            SortColumn::Low => {
+                tickers.sort_by(|a, b| a.l.partial_cmp(&b.l).unwrap());
+            }
+            SortColumn::Volume => {
+                tickers.sort_by(|a, b| a.v.cmp(&b.v));
+            }
+        }
+        if self.sort_order == SortOrder::Descending {
+            tickers.reverse();
+        }
+    }
+
+    pub fn next_sort_column(&mut self) {
+        self.sort_column = match self.sort_column {
+            SortColumn::Symbol => SortColumn::Last,
+            SortColumn::Last => SortColumn::PercentChange,
+            SortColumn::PercentChange => SortColumn::Open,
+            SortColumn::Open => SortColumn::High,
+            SortColumn::High => SortColumn::Low,
+            SortColumn::Low => SortColumn::Volume,
+            SortColumn::Volume => SortColumn::Symbol,
+        }
+    }
+
+    async fn handle_events(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let timeout = Duration::from_millis(10);
         match term::next_event(timeout)? {
-            Some(Event::Key(key)) if key.kind == KeyEventKind::Press => self.handle_key_press(key),
+            Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                self.handle_key_press(key).await
+            }
             _ => {}
         }
         Ok(())
     }
 
-    fn handle_key_press(&mut self, key: KeyEvent) {
+    async fn handle_key_press(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.mode = Mode::Quit,
             KeyCode::Char('j') | KeyCode::Down => self.next(),
             KeyCode::Char('k') | KeyCode::Up => self.previous(),
             KeyCode::Char('l') | KeyCode::Right => self.next_color(),
             KeyCode::Char('h') | KeyCode::Left => self.previous_color(),
-            KeyCode::Enter => {
-                self.show_chart = true;
-            }
+            KeyCode::Tab => self.next_sort_column(),
+            KeyCode::Char('r') => match self.sort_order {
+                SortOrder::Ascending => self.sort_order = SortOrder::Descending,
+                SortOrder::Descending => self.sort_order = SortOrder::Ascending,
+            },
+            // KeyCode::Enter => {
+            //     if !self.show_chart {
+            //         self.show_chart = true;
+            //         let chart_output = tokio::spawn(async { cschart::display_cs().await });
+            //         self.chart_data = Some(chart_output);
+            //     } else {
+            //         self.show_chart = false;
+            //     }
+            // }
             _ => {}
         };
+    }
+
+    async fn get_chart_data(&mut self) {
+        if let Some(chart_future) = self.chart_data.take() {
+            match chart_future.await {
+                Ok(Ok(chart_output)) => {
+                    self.fetched_chart = Some(chart_output);
+                }
+                Ok(Err(err)) => {
+                    eprintln!("Error: {}", err);
+                    self.show_chart = false;
+                }
+                Err(join_err) => {
+                    eprintln!("Error: {}", join_err);
+                    self.show_chart = false;
+                }
+            }
+        }
     }
 }
 
 fn ui(f: &mut Frame, app: &mut App, tickers: Arc<Mutex<Vec<HrTicker>>>) {
-    let rects = Layout::vertical([Constraint::Min(5), Constraint::Length(3)]).split(f.size());
-
     if app.show_chart {
-        let area = f.size();
+        let area = centered_rect(80, 50, f.size());
         f.render_widget(Clear, area);
 
-        // tokio::spawn(async move {
-        //     let chart = cschart::display_cs().await;
-        // });
+        app.get_chart_data();
+
+        if let Some(chart_output) = &app.fetched_chart {
+            let chart_widget = Paragraph::new(Text::from(chart_output.clone())).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("CHZ/USDT Chart")
+                    .border_type(BorderType::Double),
+            );
+            f.render_widget(chart_widget, area)
+        }
     } else {
+        let rects = Layout::vertical([Constraint::Min(5), Constraint::Length(3)]).split(f.size());
         app.set_colors();
+
+        // render_gauge(f, app, rects[0]);
 
         render_table(f, app, rects[0], tickers);
 
@@ -305,22 +422,55 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 fn render_table(f: &mut Frame, app: &mut App, area: Rect, tickers: Arc<Mutex<Vec<HrTicker>>>) {
+    let mut tickers = tickers.lock().unwrap();
+    app.sort_tickers(&mut tickers);
     let header_style = Style::default()
         .fg(app.colors.header_fg)
         .bg(app.colors.header_bg);
 
-    let header = [
-        "Symbol",
-        "Last",
-        "Percent Change",
-        "Open",
-        "High",
-        "Low",
-        "Volume",
-    ]
-    .into_iter()
-    .map(Cell::from)
-    .collect::<Row>()
+    // Determine the style for the sorted column
+    let sort_column_style = Style::default()
+        .add_modifier(Modifier::BOLD)
+        .fg(Color::Yellow);
+
+    // Create the header with highlighting on the sorted column
+    let header = Row::new(vec![
+        Cell::from("Symbol").style(if app.sort_column == SortColumn::Symbol {
+            sort_column_style
+        } else {
+            header_style
+        }),
+        Cell::from("Last").style(if app.sort_column == SortColumn::Last {
+            sort_column_style
+        } else {
+            header_style
+        }),
+        Cell::from("Percent Change").style(if app.sort_column == SortColumn::PercentChange {
+            sort_column_style
+        } else {
+            header_style
+        }),
+        Cell::from("Open").style(if app.sort_column == SortColumn::Open {
+            sort_column_style
+        } else {
+            header_style
+        }),
+        Cell::from("High").style(if app.sort_column == SortColumn::High {
+            sort_column_style
+        } else {
+            header_style
+        }),
+        Cell::from("Low").style(if app.sort_column == SortColumn::Low {
+            sort_column_style
+        } else {
+            header_style
+        }),
+        Cell::from("Volume").style(if app.sort_column == SortColumn::Volume {
+            sort_column_style
+        } else {
+            header_style
+        }),
+    ])
     .style(header_style)
     .height(1);
 
@@ -329,8 +479,6 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect, tickers: Arc<Mutex<Vec
         .fg(app.colors.selected_style_fg);
 
     let rows = tickers
-        .lock()
-        .unwrap()
         .iter()
         .enumerate()
         .map(|(i, ticker)| {
@@ -340,9 +488,21 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect, tickers: Arc<Mutex<Vec
                 app.colors.alt_row_color
             };
 
+            let last_price_color = match ticker.previous_price {
+                previous_price => {
+                    if ticker.c > previous_price {
+                        Color::Green
+                    } else if ticker.c < previous_price {
+                        Color::Red
+                    } else {
+                        app.colors.row_fg
+                    }
+                }
+            };
+
             Row::new(vec![
                 Cell::from(ticker.s.clone()),
-                Cell::from(ticker.c.to_string()),
+                Cell::from(ticker.c.to_string()).style(Style::default().fg(last_price_color)),
                 Cell::from(ticker.P.to_string()),
                 Cell::from(ticker.o.to_string()),
                 Cell::from(ticker.h.to_string()),
@@ -376,6 +536,25 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect, tickers: Arc<Mutex<Vec
     .highlight_spacing(HighlightSpacing::default());
 
     f.render_stateful_widget(table, area, &mut app.state);
+}
+
+fn render_gauge(f: &mut Frame, app: &mut App, area: Rect) {
+    f.render_widget(
+        LineGauge::default()
+            .block(Block::bordered().title("Progress"))
+            .filled_style(
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .line_set(symbols::line::THICK)
+            .ratio(0.4),
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        }),
+    );
 }
 
 fn render_scrollbar(f: &mut Frame, app: &mut App, area: Rect) {
@@ -415,6 +594,7 @@ fn update_tickers(new_tickers: Vec<HrTicker>, tickers: Arc<Mutex<Vec<HrTicker>>>
         match tickers.iter_mut().find(|t| t.s == new_ticker.s) {
             Some(existing_ticker) => {
                 // Update existing ticker
+                existing_ticker.previous_price = existing_ticker.c;
                 existing_ticker.p = new_ticker.p;
                 existing_ticker.P = new_ticker.P;
                 existing_ticker.w = new_ticker.w;
@@ -438,7 +618,35 @@ fn update_tickers(new_tickers: Vec<HrTicker>, tickers: Arc<Mutex<Vec<HrTicker>>>
         }
     }
 }
+async fn run_app(
+    mut app: App,
+    terminal: &mut Terminal<impl Backend>,
+    tickers: Arc<Mutex<Vec<HrTicker>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        // Handle events
+        if app.handle_events().await.is_err() {
+            break;
+        }
 
+        // Check if we need to update the UI with chart data
+        app.get_chart_data().await;
+
+        // Draw the UI
+        terminal.draw(|f| {
+            let tickers_clone = Arc::clone(&tickers);
+            app.ticker_length = tickers_clone.lock().unwrap().len();
+            ui(f, &mut app, tickers_clone);
+        })?;
+
+        // Exit the loop if the app is quitting
+        if !app.is_running() {
+            break;
+        }
+    }
+
+    Ok(())
+}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tickers = Tickers::new();
@@ -464,7 +672,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     terminal.clear()?;
 
-    app.run(&mut terminal, tickers.tickers)?;
+    run_app(app, &mut terminal, tickers.tickers).await?;
 
     terminal.clear()?;
     disable_raw_mode()?;
