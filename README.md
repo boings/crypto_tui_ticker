@@ -52,7 +52,7 @@ Crypto TUI is a terminal-based application that provides live updates of cryptoc
 
 License
 
-Crypto TUI is licensed under the MIT License. See LICENSE for more details.
+Crypto TUI Ticker is licensed under the MIT License. See LICENSE for more details.
 
 Acknowledgements
 
