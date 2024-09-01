@@ -60,8 +60,4 @@ Acknowledgements
 
 Contact
 
-Created by Your Name - feel free to contact me!
-
-```
-
-```
+Created by boings - feel free to contact me!
