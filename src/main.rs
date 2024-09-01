@@ -1,21 +1,19 @@
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    },
+    event::{DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
     terminal::LeaveAlternateScreen,
 };
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout, Margin, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     style::{palette::tailwind, Color, Modifier, Style},
     symbols,
     text::{Line, Text},
     widgets::{
         Block, BorderType, Borders, Cell, Clear, HighlightSpacing, LineGauge, Paragraph, Row,
-        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState,
     },
     Frame, Terminal,
 };
@@ -27,9 +25,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 mod term;
 
@@ -167,7 +163,7 @@ impl TableColors {
 
 const ITEM_HEIGHT: usize = 1;
 const INFO_TEXT: &str =
-    "(Esc) quit | (↑) move up | (↓) move down | (→) next color | (←) previous color";
+    "(Esc) quit | (↑,k) up | (↓,j) down | (→,l) next color | (←,h) previous color | (Tab) sort next column | (r) reverse sort";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -320,7 +316,7 @@ impl App {
     }
 
     async fn handle_events(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let timeout = Duration::from_millis(10);
+        let timeout = Duration::from_millis(0);
         match term::next_event(timeout)? {
             Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 self.handle_key_press(key).await
@@ -650,13 +646,11 @@ async fn run_app(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tickers = Tickers::new();
-    let mut app = App::new();
+    let app = App::new();
     let (tx, mut rx) = mpsc::channel::<Vec<HrTicker>>(100);
-    //let app_clone = Arc::clone(&app);
     let tickers_clone = tickers.tickers.clone();
     tokio::spawn(async move {
         while let Some(results) = rx.recv().await {
-            //let app = Arc::clone(&app_clone);
             update_tickers(results, tickers_clone.clone());
         }
     });
