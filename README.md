@@ -1,9 +1,9 @@
-# Crypto TUI
+# Crypto TUI Ticker
 
 ![Rust](https://img.shields.io/badge/Rust-1.65%2B-orange?style=for-the-badge&logo=rust)
 ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)
 ![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen?style=for-the-badge&logo=githubactions)
-![Issues](https://img.shields.io/github/issues/username/crypto-tui?style=for-the-badge)
+![Issues](https://img.shields.io/github/issues/boings/crypto_tui_ticker?style=for-the-badge)
 
 Crypto TUI is a terminal-based application that provides live updates of cryptocurrency tickers using a stylish, interactive table. Built with Rust and `ratatui`, this application lets you sort tickers by columns, visually track price changes, and navigate effortlessly using keyboard shortcuts.
 
@@ -13,7 +13,6 @@ Crypto TUI is a terminal-based application that provides live updates of cryptoc
 - 🔍 **Sortable Columns**: Easily sort each column to analyze the data in the way that suits you best.
 - 🌈 **Color-Coded Price Changes**: Instantly see price changes with green and red highlights.
 - 🎨 **Customizable Table Styles**: Switch color palettes on the fly to suit your visual preferences.
-- 🪟 **Floating Windows**: View additional data in floating windows, allowing for an enhanced user experience.
 
 ## Demo
 
