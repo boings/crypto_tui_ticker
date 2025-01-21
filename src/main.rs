@@ -163,7 +163,7 @@ impl TableColors {
 
 const ITEM_HEIGHT: usize = 1;
 const INFO_TEXT: &str =
-    "(Esc) quit | (↑,k) up | (↓,j) down | (→,l) next color | (←,h) previous color | (Tab) sort next column | (r) reverse sort";
+    "(Esc, q) quit | (↑, k) up | (↓, j) down | (→, l) next color | (←, h) previous color | (Tab) sort next column | (r) reverse sort";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum Mode {
